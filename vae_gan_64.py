@@ -1,6 +1,9 @@
+# ==============================================================
+# VAE + GAN (64x64) — Projeto final alinhado (VAEs & GANs)
 # Pedro Furtado Cunha - 837711
-# Ígor Almeida Polegato - 
+# Ígor Almeida Polegato -
 # André Fernando Machado - 837864
+# ==============================================================
 
 from __future__ import annotations
 import os, glob, random
@@ -97,10 +100,15 @@ def get_loaders(args: Args) -> Tuple[DataLoader, Optional[DataLoader]]:
     - MNIST e FashionMNIST: treino+teste
     - ImageFolder: um DataLoader (treino)
     - Flat (Kaggle florestas): um DataLoader (treino)
+    BLINDAGEM DE CANAIS:
+      - se in_ch==1 e grayscale==1 -> força 1 canal
+      - se in_ch==3             -> força 3 canais (útil para MNIST/Fashion)
     """
-    tfms = [T.Resize((64,64))]
+    tfms: List[torch.nn.Module] = [T.Resize((64,64))]
     if args.in_ch == 1 and args.grayscale:
         tfms.append(T.Grayscale(num_output_channels=1))
+    if args.in_ch == 3:
+        tfms.append(T.Grayscale(num_output_channels=3))  # garante 3 canais em MNIST/Fashion
     tfms.append(T.ToTensor())
     transform = T.Compose(tfms)
 
@@ -237,7 +245,7 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         h = self.main(x)
-        return self.last(h).view(x.size(0))  # logits
+        return self.last(h).view(x.size(0))  # logits (B,)
 
 
 def bce_logits(pred, target):
@@ -252,7 +260,7 @@ class EMA:
     @torch.no_grad()
     def update(self, model: nn.Module):
         for k,v in model.state_dict().items():
-            self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1-self.decay)
+            self.shadow[k].mul_((self.decay)).add_(v.detach(), alpha=1-self.decay)
     @torch.no_grad()
     def copy_to(self, model: nn.Module):
         model.load_state_dict(self.shadow)
@@ -275,8 +283,14 @@ def train_vae(args: Args, train: DataLoader, test: Optional[DataLoader], outdir:
         pbar = tqdm(train, desc=f"[VAE] {ep}/{args.epochs_vae}")
         for x, _ in pbar:
             x = x.to(dev)
-            if args.in_ch == 1 and x.size(1) == 3:  # segurança: força 1 canal quando pedido
+
+            # ----- PATCH DE CANAIS (blindagem 1↔3) -----
+            if args.in_ch == 1 and x.size(1) == 3:  # modelo 1 canal, dataset RGB
                 x = x[:, :1]
+            if args.in_ch == 3 and x.size(1) == 1:  # modelo RGB, dataset 1 canal (MNIST/Fashion)
+                x = x.repeat(1, 3, 1, 1)
+            # ------------------------------------------
+
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=bool(args.amp)):
                 logits, mu, logvar = vae(x)
@@ -290,8 +304,9 @@ def train_vae(args: Args, train: DataLoader, test: Optional[DataLoader], outdir:
             with torch.no_grad():
                 # Reconstruções
                 x,_ = next(iter(train))
-                x = x.to(dev); 
+                x = x.to(dev)
                 if args.in_ch == 1 and x.size(1) == 3: x = x[:, :1]
+                if args.in_ch == 3 and x.size(1) == 1: x = x.repeat(1, 3, 1, 1)
                 rec = torch.sigmoid(vae(x)[0])
                 save_image(to_grid(torch.cat([x[:32], rec[:32]],0), 8),
                            os.path.join(outdir,f"vae_recon_e{ep}.png"))
@@ -327,8 +342,14 @@ def train_gan(args: Args, train: DataLoader, outdir: str, z_dim: int, vae_decode
         pbar = tqdm(train, desc=f"[GAN] {ep}/{args.epochs_gan}")
         for x,_ in pbar:
             x = x.to(dev)
-            if args.in_ch == 1 and x.size(1) == 3:
+
+            # ----- PATCH DE CANAIS (blindagem 1↔3) -----
+            if args.in_ch == 1 and x.size(1) == 3:  # modelo 1 canal, dataset RGB
                 x = x[:, :1]
+            if args.in_ch == 3 and x.size(1) == 1:  # modelo RGB, dataset 1 canal
+                x = x.repeat(1, 3, 1, 1)
+            # ------------------------------------------
+
             b = x.size(0)
 
             # 1) Atualiza D: reais=1 (ou 0.9 se smoothing), fakes=0
@@ -337,8 +358,8 @@ def train_gan(args: Args, train: DataLoader, outdir: str, z_dim: int, vae_decode
                 fake_logits = G(z)
                 x_fake = torch.sigmoid(fake_logits)   # imagem [0,1]
             optD.zero_grad(set_to_none=True)
-            y_real = torch.full((b,), fill_value=args.label_smoothing, device=dev)
-            y_fake = torch.zeros(b, device=dev)
+            y_real = torch.full((b,), fill_value=args.label_smoothing, device=dev, dtype=torch.float32)
+            y_fake = torch.zeros(b, device=dev, dtype=torch.float32)
             with torch.cuda.amp.autocast(enabled=bool(args.amp)):
                 Dr = D(x)
                 Df = D(x_fake)
@@ -351,7 +372,7 @@ def train_gan(args: Args, train: DataLoader, outdir: str, z_dim: int, vae_decode
             optG.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=bool(args.amp)):
                 Df = D(torch.sigmoid(G(z)))
-                lossG = bce_logits(Df, torch.ones_like(Df))
+                lossG = bce_logits(Df, torch.ones_like(Df, dtype=torch.float32))
             scalerG.scale(lossG).backward()
             scalerG.step(optG); scalerG.update()
 
