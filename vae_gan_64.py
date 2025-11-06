@@ -1,7 +1,7 @@
 # ==============================================================
-# VAE + GAN (64x64) — Projeto final alinhado (VAEs & GANs)
+# VAE + GAN (64x64)
 # Pedro Furtado Cunha - 837711
-# Ígor Almeida Polegato -
+# Ígor Almeida Polegato - 838821
 # André Fernando Machado - 837864
 # ==============================================================
 
@@ -470,3 +470,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
